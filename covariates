@@ -1,0 +1,111 @@
+#################################################################################
+# This script contains the data manipulation and cleaning for the Dyadice model #
+# Without dt.                                                                   #
+#################################################################################
+
+
+library(stringdist) #Calculating string distances
+library(tidyverse)
+library(geodist)
+
+#Load and clean the distance data
+
+dis_data <- read.csv("./Grollemund-et-al_Bantu-database_2015.csv", 
+                     header = TRUE) #426 languages
+
+french <- dis_data[1,]
+english <- dis_data[2,]
+dis_data <- dis_data[-(1:2),-(101:102)]
+
+dis_data = dis_data %>%
+  mutate(Words = str_replace_all(Words, "\\*", ""))
+
+dis_data = dis_data %>%
+  mutate(Words = ifelse(Words == 'D308_Bodo2', 'D308_Bodo', Words))
+
+
+
+dis_data = dis_data |> select(-X.1) |> filter(Words != 'C401_Babati_1919' 
+                                              & Words != 'D313_Mbuttu_1919' 
+                                              & Words != 'Zaambo_Jarawan'
+                                              & Words != 'Bwazza_Jarawan' 
+                                              & Words != 'Mbula_Jarawan'
+                                              & Words != 'Bile_Jarawan' 
+                                              & Words != 'Kulung_Jarawan'
+                                              & Words != 'Duguri_Jarawan'
+                                              & Words != 'D308_Ebodo')
+
+
+Words <- dis_data$Words
+
+dis_data = dis_data |> select(-Words)
+
+# For validation purposes
+
+test = dis_data |> right_join(time_data,join_by(Words == word), keep = T) |> 
+    select(Words, word)
+
+##############################################################################################################
+
+# Define a funtion to calculate the string distance
+stringVecDist <- function(lang1, lang2, method='jw'){
+  len <- length(lang1)
+  len1 <- length(lang2)
+  if(len!=len1) stop("Lang1 and lang2 don't have the same number of attributes")
+  
+  similarities <- rep(NA, len)
+  for(iter in 1:len){
+    a_tmp <- unlist(lang1[iter])
+    b_tmp <- unlist(lang2[iter])
+    # Assign some similarity scores to missing data
+    if(a_tmp=="?" | b_tmp=="?")  similarities[iter] <- NA else{
+      similarities[iter] <- stringdist(a_tmp, b_tmp, method=method) 
+    }
+  }
+  ## Opportunities for assigning varying weights for different attributes
+  return(mean(similarities, na.rm=TRUE))
+}
+
+
+
+# Andrew's Touch ----------------------------------------------------------------------------------------------
+
+# Number of rows
+n <- nrow(dis_data)
+
+# Create an empty matrix to store distances
+distance_matrix <- matrix(NA, nrow = n, ncol = n)
+rownames(distance_matrix) <- rownames(df)
+colnames(distance_matrix) <- rownames(df)
+
+
+for (i in 1:n) {
+  for (j in i:n) {  # Only loop through upper triangle
+    if (i == j) {
+      distance_matrix[i, j] <- 0
+      next
+    }
+
+    total_dist = stringVecDist(dis_data[i,], dis_data[j,])
+
+    distance_matrix[i, j] <- total_dist
+    distance_matrix[j, i] <- total_dist  # Symmetric
+  }
+}
+
+
+
+write.csv(distance_matrix, file = './distance_mat_nodt.csv')
+
+
+string_mat = read.csv('./distance_mat_nodt.csv')
+
+string_mat = string_mat[,-1]
+
+
+string_vec = c()
+
+for (i in 1:(nrow(string_mat) - 1)) {
+  string_vec <- c(string_vec, string_mat[i, (i + 1):ncol(string_mat)])
+}
+
