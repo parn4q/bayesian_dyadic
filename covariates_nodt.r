@@ -1,0 +1,1250 @@
+############################################################
+# This script contains the covariates needed for the model #
+# (without Node level stuff)                               #
+############################################################
+
+#setwd("E:\\Likun\\Bayesian Dyadic") # set working  directory
+#setwd("/Volumes/Lexar/Likun/Bayesian Dyadic") #for mac usage
+
+
+library(tidyverse)
+library(elevatr) # gets elevation points of africa's elevation
+library(sf) # to manipulate spatial data
+library(rnaturalearth)
+library(geodist)
+library(scales)
+library(magick)
+
+# load and clean the time data
+
+time_data = readxl::read_excel('./Geo-coordinates-timing.xlsx', sheet = 'Sheet1')
+
+
+time_data = time_data |> 
+    select(1, longitude, latitude) |>
+    rename(word = 1) |>
+    mutate(word = str_replace_all(word, "\\*", "")) |>
+    mutate(word = ifelse(word == 'D308_Bodo2', 'D308_Bodo', word)) |>
+    filter(!word %in% c('C401_Babati_1919', 'D313_Mbuttu_1919',
+                    'Zaambo_Jarawan', 'Bwazza_Jarawan', 
+                    'Mbula_Jarawan', 'Bile_Jarawan', 
+                    'Kulung_Jarawan', 'Duguri_Jarawan', 
+                    'D308_Ebodo')) |>
+    mutate(longitude = as.numeric(longitude), latitude = as.numeric(latitude)) 
+
+
+
+
+###################################################
+## Create a Grid of spatial points to predict on ##
+###################################################
+ 
+# --- Step 1: Create Grid --- #
+
+# Create the bounds of interest
+lon_min <- 8.65
+lon_max <- 44.40
+lat_min <- -31.50
+lat_max <- 6.34
+
+# increment to use
+step_deg <- 0.5
+
+# --- Create Grid --- #
+grid_points <- list()
+row_id <- 1
+
+lat <- lat_min
+while (lat <= lat_max) {
+  lon <- lon_min
+  while (lon <= lon_max) {
+    grid_points[[row_id]] <- c(lon, lat)
+    row_id <- row_id + 1
+    lon <- lon + step_deg
+  }
+  lat <- lat + step_deg
+}
+
+# Convert to data.frame
+grid_df <- as.data.frame(do.call(rbind, grid_points))
+names(grid_df) <- c("longitude", "latitude")
+
+# Quick check
+nrow(grid_df)
+head(grid_df)
+
+# --- Step 2: Convert grid to sf points --- #
+grid_sf <- st_as_sf(grid_df, coords = c("longitude", "latitude"), crs = 4326)
+
+# --- Step 3: Load African land polygons --- #
+africa <- ne_countries(continent = "Africa", scale = "medium", returnclass = "sf")
+
+# --- Step 4: Keep only points inside land polygons --- #
+africa_union <- st_union(africa)
+grid_land <- st_intersection(grid_sf, africa_union)
+
+# --- Step 5: Convert back to data.frame if needed --- #
+grid_land_df <- grid_land %>%
+  st_drop_geometry() %>%
+  as.data.frame()
+
+# Extract coordinates (longitude and latitude) from sf object
+grid_land_df2 <- grid_land %>%
+  mutate(
+    longitude = st_coordinates(.)[, 1],
+    latitude = st_coordinates(.)[, 2]
+  ) %>%
+  st_drop_geometry() |>
+  select(longitude, latitude) |>
+  #remove points that are in madagascar
+  filter(longitude < 40.5) 
+
+manual_points <- tibble(
+  longitude = c(43.30740, 43.72, 44.337),
+  latitude  = c(-11.46817, -12.30, -12.199)
+)
+
+manual_points <- manual_points |>
+  mutate(
+    longitude = round(longitude / 0.5) * 0.5,
+    latitude  = round(latitude / 0.5) * 0.5
+  )
+
+grid_land_df2 <- bind_rows(grid_land_df2, manual_points)
+
+
+time_data = rbind(time_data |> select(-1), grid_land_df2)
+
+time_data = time_data |>
+     mutate(long_sc = scale(longitude),
+            lat_sc = scale(latitude))
+
+
+
+# Elevation --------------------------------------------------------------------
+
+# 1. Create sf object for annual_at_all_locs_2006
+africa_elevation_sf <- st_as_sf(
+  time_data,
+  coords = c("longitude", "latitude"), 
+  crs = 4326
+)
+
+# 2. Use get_elev_point() on the sf object
+#    'prj' should match the CRS of your sf object
+elevation_all_locs_sf <- get_elev_point(africa_elevation_sf, prj = 4326, 
+                                        src = "aws")
+africa_elevation_sf$elevation <- elevation_all_locs_sf$elevation
+
+# Extract coordinates
+elevation_coords <- africa_elevation_sf %>%
+  st_coordinates() %>%
+  as.data.frame() %>%
+  rename(Longitude_ele = X, Latitude_ele = Y)
+
+elevation_coords$elevation = africa_elevation_sf$elevation
+
+time_data$elevation = scale(africa_elevation_sf$elevation,
+                            center = T,
+                            scale = T)
+
+
+# Disable s2 processing to avoid self-intersection issues
+sf_use_s2(FALSE)
+
+# Load Africa map
+africa <- ne_countries(continent = "Africa", returnclass = "sf") #shape file of Africa
+
+# Load natural water bodies
+africa_lakes <- ne_download(scale = 10, category = "physical", 
+                            type = "lakes", returnclass = "sf")
+africa_rivers <- ne_download(scale = 10, category = "physical", 
+                             type = "rivers_lake_centerlines", 
+                             returnclass = "sf")
+
+
+# Ensure geometries are valid
+africa_lakes <- st_make_valid(africa_lakes)
+africa_rivers <- st_make_valid(africa_rivers)
+
+# Remove invalid geometries if any still exist
+africa_lakes <- africa_lakes[st_is_valid(africa_lakes), ]
+africa_rivers <- africa_rivers[st_is_valid(africa_rivers), ]
+
+# Perform spatial intersection
+africa_lakes <- st_intersection(africa_lakes, africa)
+africa_rivers <- st_intersection(africa_rivers, africa)
+
+#Plot the extracted freshwater data
+ggplot() +
+  geom_sf(data = africa, fill = "lightgray", color = "black") +
+  geom_sf(data = africa_lakes, fill = "blue", color = "blue") +
+  geom_sf(data = africa_rivers, color = "blue")  +
+  ggnewscale::new_scale('color') +
+  scale_color_gradient2(low = 'red', mid = 'yellow', high = 'green')+
+  ggtitle("Freshwater Bodies in Africa for each Language") +
+  theme_minimal()
+
+#extract the latitude and longitude data for lakes
+
+lake_coords <- africa_lakes %>%
+  mutate(geometry = st_cast(geometry, "LINESTRING"))
+
+# Extract coordinates
+lake_coords <- lake_coords %>%
+  st_coordinates() %>%
+  as.data.frame() %>%
+  rename(Longitude = X, Latitude = Y)
+
+
+#extract the latitude and longitude data for river
+
+# Ensure geometries are converted to LINESTRING (if necessary)
+river_coords <- africa_rivers %>%
+  mutate(geometry = st_cast(geometry, "LINESTRING"))
+
+# Extract coordinates
+river_coords <- river_coords %>%
+  st_coordinates() %>%
+  as.data.frame() %>%
+  rename(Longitude = X, Latitude = Y)
+
+
+# Calculating the distance to the nearest freshwater----------------------------
+
+# Add a 'type' column
+lakes_sf <- lake_coords %>% mutate(type = "lake")
+rivers_sf <- river_coords %>% mutate(type = "river")
+
+# Combine into one sf object
+water_bodies_sf <- rbind(lakes_sf, rivers_sf)
+
+water_bodies_sf = st_as_sf(water_bodies_sf, 
+                           coords = c("Longitude","Latitude"), crs = 4326)
+
+
+# Find nearest body of water
+
+dis_data_sf = time_data |> 
+  st_as_sf(coords = c("longitude","latitude"), crs = 4326)
+
+dis_coords <- dis_data_sf %>%
+  st_coordinates() %>%
+  as.data.frame() %>%
+  rename(Longitude = X, Latitude = Y)
+
+
+
+
+nearest_idx <- st_nearest_feature(dis_data_sf, water_bodies_sf)
+
+# Get nearest water body details
+result <- dis_data_sf  %>%
+  mutate(
+    nearest_water_id = water_bodies_sf$id[nearest_idx],
+    nearest_water_type = water_bodies_sf$type[nearest_idx],
+    nearest_water_lat = st_coordinates(water_bodies_sf)[nearest_idx, 2],
+    nearest_water_lon = st_coordinates(water_bodies_sf)[nearest_idx, 1]
+  )
+
+
+time_data = time_data |> mutate(nearest_water_type = result$nearest_water_type,
+                             nearest_water_lat = result$nearest_water_lat,
+                             nearest_water_lon = result$nearest_water_lon)
+
+time_data$nearest_water_lat_sc = scale(time_data$nearest_water_lat,
+                                    center = T,
+                                    scale = T)
+time_data$nearest_water_lon_sc = scale(time_data$nearest_water_lon,
+                                  center = T,
+                                  scale = T)
+
+# --- Geographical data --- #
+
+# --- Load in the image data --- #
+
+image_path <- "./3000BC_.png"  # 3000 BC
+
+image_path2 = "./5000bc_.PNG" # 5000 BC
+
+image_path3 = "./Africa0BC.PNG"
+
+#convert path to an image in r
+img = image_read(image_path) 
+
+#obtain the format, dimensions, etc of the image
+image_info(img) 
+
+#pdf(file = './3000BCafrica.pdf', width = 5.5, height = 5)
+
+plot(img)
+
+
+dev.off()
+
+#Converts the information to extract RGB info
+img_raster = image_data(img, channels = 'rgb') 
+
+# Convert the raster to a matrix
+img_matrix <- as.integer(img_raster) 
+
+# Get the dimensions of the image
+dims <- dim(img_matrix)
+
+##############################################################################
+# For the 3000 BC image, we grab the rgb pixels then map the time data to it #
+# You don't have to run this code unless you need to make changes.  The data #
+# is already saved as a csv.                                                 #
+##############################################################################
+
+
+# --- Find the RGB pixels --- #
+
+# # Create a data frame with pixel locations and RGB values
+# rgb_values <- data.frame(
+#   x = rep(1:dims[2], each = dims[1]),
+#   y = rep(1:dims[1], times = dims[2]),
+#   r = as.vector(img_matrix[,,1]),
+#   g = as.vector(img_matrix[,,2]),
+#   b = as.vector(img_matrix[,,3])
+# )
+
+# #obtains the hex codes
+# rgb_values$hex = rgb(rgb_values$r / 255, rgb_values$g / 255, rgb_values$b / 255) 
+
+
+# # This will help us remove the white space
+# # Define a white color threshold (you can adjust the tolerance)
+# white_threshold <- 245  # A value close to 255 indicates white
+
+# # Identify non-white pixels
+# non_white_pixels <- rgb_values %>%
+#   filter(r < white_threshold & g < white_threshold & b < white_threshold)
+
+
+# # Define Africa's geographic bounds
+# min_lon <- -20  # Left longitude (West Africa)
+# max_lon <- 55   # Right longitude (East Africa)
+# min_lat <- -35  # Bottom latitude (South Africa)
+# max_lat <- 37   # Top latitude (North Africa)
+
+# # Convert pixel (x, y) to latitude and longitude
+# non_white_pixels <- non_white_pixels %>%
+#   mutate(
+#     lon = min_lon + (x / dims[2]) * (max_lon - min_lon),
+#     lat = max_lat - (y / dims[1]) * (max_lat - min_lat)  # Invert y-axis
+#   )
+
+
+# closest_color_name <- function(hex) {
+#   # Try to get the RGB value of the hex color
+#   hex_rgb <- tryCatch(col2rgb(hex), error = function(e) return(NA))
+  
+#   # If it's NA (invalid hex), return NA
+#   if (any(is.na(hex_rgb))) return(NA)
+  
+#   # Get all base R color names and their RGB values
+#   all_colors <- colors()
+#   all_rgb <- col2rgb(all_colors)
+  
+#   # Compute Euclidean distances between hex color and each base color
+#   distances <- apply(all_rgb, 2, function(color_rgb) {
+#     sum((color_rgb - hex_rgb)^2)
+#   })
+  
+#   # Find the closest color name
+#   closest <- all_colors[which.min(distances)]
+#   return(closest)
+# }
+
+
+# non_white_pixels$color_name <- sapply(unlist(non_white_pixels$hex), closest_color_name)
+
+# non_white_pixels |> select(color_name) |> distinct()
+
+
+# non_white_pixels2 = non_white_pixels |> 
+#   filter(!str_detect(color_name, regex("gra", ignore_case = TRUE))) # Remove gray
+
+# non_white_pixels |> group_by(color_name) |> summarise(mean_long = mean(lon),
+#                                                       mean_lat = mean(lat))
+
+# non_white_pixels2 = non_white_pixels2 |> filter(lon > 5 & lat < 10) #filter based on node lat and long to minimize some colors
+
+# non_white_pixels2 |> select(color_name) |> distinct() #unique colors
+
+# --- Run this to grab the csv of the data of the above code --- # 
+
+#write.csv(non_white_pixels2, file = './color_data_3000BCE.csv')
+
+################################################################################
+# Load in the data from the previous section, find the distance to the time    #
+# data points.                                                                 #
+################################################################################
+
+# --- Load pixel data for 3000bce --- #
+
+non_white_pixels2 = read.csv(file = './color_data_3000BCE.csv')
+
+# --- inferring the geographical region --- #
+
+# Compute all pairwise distances using geodist (haversine is the default method)
+dist_matrix <- geodist(time_data |> select(longitude, latitude) |> 
+                         rename('lon'= "longitude" , 'lat' = "latitude"),
+                       non_white_pixels2[, c("lon", "lat")],
+                       measure = "haversine")/1000
+
+
+
+# Find the index of the minimum distance for each row in df_a
+closest_index <- apply(dist_matrix, 1, which.min)
+
+
+
+# Create the result by combining df_a with closest matches and distances
+closest_matches <- time_data %>%
+  mutate(
+    closest_id = non_white_pixels2$id[closest_index],
+    closest_color = non_white_pixels2$color_name[closest_index],
+    min_distance_m = dist_matrix[cbind(1:nrow(time_data), closest_index)]
+  )
+
+validation = closest_matches |> select(longitude, latitude, 
+                                       closest_color, min_distance_m)
+
+
+
+validation = closest_matches |> select(longitude, latitude, 
+                                       closest_color, min_distance_m)
+
+#table(validation$closest_color)
+
+validation2 = validation |> 
+  mutate(geo_region_4_5000 = case_when(longitude >= 8.65 & latitude >= -18.2 & 
+                                  (closest_color == "thistle3" | closest_color == 'thistle' | closest_color == 'lavenderblush3') ~ 'savanna',
+                                  
+                                longitude >= 8.78 & latitude >= -12.8 & 
+                                  (closest_color  == 'springgreen4' | closest_color == 'azure3'| 
+                                     closest_color  == 'lightcyan4'| closest_color == 'mistyrose2') ~ 'tropical_rainforest',
+                                
+                                longitude >= 24.6 & latitude >= -31.5 & 
+                                  (closest_color  == 'khaki2' | closest_color == 'powderblue'| 
+                                     closest_color =='bisque2'| closest_color =='palegoldenrod') ~ 'grasslands',
+                                
+                                longitude >= 17.3 & latitude >= -28 & 
+                                  (closest_color  == 'palegreen3' | 
+                                     closest_color  == 'lightcyan2' | closest_color == 'mediumseagreen') ~ 'woodland',
+                                
+                                longitude >= 10.5 & latitude >= -22.7 & 
+                                  (closest_color  == 'darkseagreen2' | closest_color  == 'darkseagreen3' | 
+                                     closest_color == 'honeydew2' | closest_color  == 'ivory3') ~ 'scrub',
+                                
+                                longitude >= 21.8 & latitude >= -22.9 & closest_color  == 'navajowhite2' ~ 'semi_desert'
+  )
+  )
+
+
+validation3000 = validation2 |> 
+  mutate(geo_region_4_5000 = ifelse(is.na(geo_region_4_5000) == TRUE, 
+         'tropical_rainforest', geo_region_4_5000))
+
+
+
+
+##############################################################################
+# For the 5000 BC image, we grab the rgb pixels then map the time data to it #
+##############################################################################
+
+
+# #convert path to an image in r
+# img = image_read(image_path2) 
+
+# #obtain the format, dimensions, etc of the image
+# image_info(img) 
+
+# #pdf(file = './3000BCafrica.pdf', width = 5.5, height = 5)
+
+# plot(img)
+
+
+# dev.off()
+
+# #Converts the information to extract RGB info
+# img_raster = image_data(img, channels = 'rgb') 
+
+# # Convert the raster to a matrix
+# img_matrix <- as.integer(img_raster) 
+
+# # Get the dimensions of the image
+# dims <- dim(img_matrix)
+
+
+# # Create a data frame with pixel locations and RGB values
+# rgb_values <- data.frame(
+#   x = rep(1:dims[2], each = dims[1]),
+#   y = rep(1:dims[1], times = dims[2]),
+#   r = as.vector(img_matrix[,,1]),
+#   g = as.vector(img_matrix[,,2]),
+#   b = as.vector(img_matrix[,,3])
+# )
+
+
+# #obtains the hex codes
+# rgb_values$hex = rgb(rgb_values$r / 255, rgb_values$g / 255, rgb_values$b / 255) 
+
+
+# # This will help us remove the white space
+# # Define a white color threshold (you can adjust the tolerance)
+# white_threshold <- 245  # A value close to 255 indicates white
+
+# # Identify non-white pixels
+# non_white_pixels <- rgb_values %>%
+#   filter(r < white_threshold & g < white_threshold & b < white_threshold)
+
+
+# # Define Africa's geographic bounds
+# min_lon <- -20  # Left longitude (West Africa)
+# max_lon <- 55   # Right longitude (East Africa)
+# min_lat <- -35  # Bottom latitude (South Africa)
+# max_lat <- 37   # Top latitude (North Africa)
+
+# # Convert pixel (x, y) to latitude and longitude
+# non_white_pixels <- non_white_pixels %>%
+#   mutate(
+#     lon = min_lon + (x / dims[2]) * (max_lon - min_lon),
+#     lat = max_lat - (y / dims[1]) * (max_lat - min_lat)  # Invert y-axis
+#   )
+
+
+# closest_color_name <- function(hex) {
+#   # Try to get the RGB value of the hex color
+#   hex_rgb <- tryCatch(col2rgb(hex), error = function(e) return(NA))
+  
+#   # If it's NA (invalid hex), return NA
+#   if (any(is.na(hex_rgb))) return(NA)
+  
+#   # Get all base R color names and their RGB values
+#   all_colors <- colors()
+#   all_rgb <- col2rgb(all_colors)
+  
+#   # Compute Euclidean distances between hex color and each base color
+#   distances <- apply(all_rgb, 2, function(color_rgb) {
+#     sum((color_rgb - hex_rgb)^2)
+#   })
+  
+#   # Find the closest color name
+#   closest <- all_colors[which.min(distances)]
+#   return(closest)
+# }
+
+
+# non_white_pixels$color_name <- sapply(unlist(non_white_pixels$hex), closest_color_name)
+
+
+# closest_color_name("#E6C8E5") 
+
+# closest_color_name("#C7D7D0") 
+
+
+
+# non_white_pixels |> select(color_name) |> distinct()
+
+
+# non_white_pixels2 = non_white_pixels |> 
+#   filter(!str_detect(color_name, regex("gra", ignore_case = TRUE))) # Remove gray
+
+# non_white_pixels |> group_by(color_name) |> summarise(mean_long = mean(lon),
+#                                                       mean_lat = mean(lat))
+
+# non_white_pixels2 = non_white_pixels2 |> filter(lon > 5 & lat < 10) #filter based on node lat and long to minimize some colors
+
+# non_white_pixels2 |> select(color_name) |> distinct() #unique colors
+
+
+
+#write.csv(non_white_pixels2, file = './color_data_5000BCE.csv')
+
+################################################################################
+# Load in the 5000 BCE data from the previous section, find the distance to    #
+# the time data points                                                         #
+################################################################################
+
+
+non_white_pixels2 = read.csv(file = './color_data_5000BCE.csv')
+
+# Compute all pairwise distances using geodist (haversine is the default method)
+dist_matrix <- geodist(time_data |> select(longitude, latitude) |> 
+                         rename('lon'= "longitude" , 'lat' = "latitude"),
+                       non_white_pixels2[, c("lon", "lat")],
+                       measure = "haversine")
+
+
+
+# Find the index of the minimum distance for each row in df_a
+closest_index <- apply(dist_matrix, 1, which.min)
+
+
+
+# Create the result by combining df_a with closest matches and distances
+closest_matches <- time_data %>%
+  mutate(
+    closest_id = non_white_pixels2$id[closest_index],
+    closest_color = non_white_pixels2$color_name[closest_index],
+    min_distance_m = dist_matrix[cbind(1:nrow(time_data), closest_index)]
+  )
+
+
+validation = closest_matches |> select(longitude, latitude,
+                                       closest_color, min_distance_m)
+
+#table(validation$closest_color)
+
+validation2 = validation |> 
+  mutate(geo_region_5000 = case_when(longitude >= 8.65 & latitude >= -18.2 & 
+                                  (closest_color == 'thistle' | 
+                                     closest_color == 'thistle3'| 
+                                     closest_color =='bisque2') ~ 'savanna',
+                                longitude >= 8.78 & latitude >= -12.8 & 
+                                  (closest_color  == 'springgreen4' | closest_color == 'azure3'| 
+                                     closest_color  == 'lightcyan4'| closest_color  == 'seagreen' |
+                                     closest_color == 'darkseagreen2'| closest_color  == 'mediumseagreen'|
+                                     closest_color == 'mistyrose2') ~ 'tropical_rainforest',
+                                longitude >= 24.6 & latitude >= -31.5 & 
+                                  (closest_color  == 'khaki2' | closest_color == 'powderblue'| 
+                                     closest_color =='palegoldenrod') ~ 'grasslands',
+                                longitude >= 17.3 & latitude >= -28 & 
+                                  (closest_color  == 'palegreen3' | 
+                                     closest_color  == 'lightcyan2' | closest_color == 'mediumseagreen'| 
+                                     closest_color == 'lavenderblush3') ~ 'woodland',
+                                longitude >= 10.5 & latitude >= -22.7 & 
+                                  (closest_color  == 'darkseagreen2' | closest_color  == 'darkseagreen3' | 
+                                     closest_color == 'honeydew2'| closest_color  == 'ivory3' ) ~ 'scrub',
+                                longitude >= 21.8 & latitude >= -22.9 & closest_color  == 'navajowhite2' ~ 'semi_desert'
+  )
+  )
+
+validation5000 = validation2 |> mutate(geo_region_5000 = ifelse(is.na(geo_region_5000) == TRUE, 
+                                                        'tropical_rainforest', geo_region_5000))
+
+###################################################
+# The most Recent geographical region of Africa   #
+###################################################
+
+
+# #convert path to an image in r
+# img = image_read(image_path3) 
+
+# #obtain the format, dimensions, etc of the image
+# image_info(img) 
+
+# #pdf(file = './3000BCafrica.pdf', width = 5.5, height = 5)
+
+# plot(img)
+
+
+# dev.off()
+
+# #Converts the information to extract RGB info
+# img_raster = image_data(img, channels = 'rgb') 
+
+# # Convert the raster to a matrix
+# img_matrix <- as.integer(img_raster) 
+
+# # Get the dimensions of the image
+# dims <- dim(img_matrix)
+
+
+# # Create a data frame with pixel locations and RGB values
+# rgb_values <- data.frame(
+#   x = rep(1:dims[2], each = dims[1]),
+#   y = rep(1:dims[1], times = dims[2]),
+#   r = as.vector(img_matrix[,,1]),
+#   g = as.vector(img_matrix[,,2]),
+#   b = as.vector(img_matrix[,,3])
+# )
+
+
+# #obtains the hex codes
+# rgb_values$hex = rgb(rgb_values$r / 255, rgb_values$g / 255, rgb_values$b / 255) 
+
+
+# # This will help us remove the white space
+# # Define a white color threshold (you can adjust the tolerance)
+# white_threshold <- 245  # A value close to 255 indicates white
+
+# # Identify non-white pixels
+# non_white_pixels <- rgb_values %>%
+#   filter(r < white_threshold & g < white_threshold & b < white_threshold)
+
+
+# # Define Africa's geographic bounds
+# min_lon <- -20  # Left longitude (West Africa)
+# max_lon <- 55   # Right longitude (East Africa)
+# min_lat <- -35  # Bottom latitude (South Africa)
+# max_lat <- 37   # Top latitude (North Africa)
+
+# # Convert pixel (x, y) to latitude and longitude
+# non_white_pixels <- non_white_pixels %>%
+#   mutate(
+#     lon = min_lon + (x / dims[2]) * (max_lon - min_lon),
+#     lat = max_lat - (y / dims[1]) * (max_lat - min_lat)  # Invert y-axis
+#   )
+
+
+# closest_color_name <- function(hex) {
+#   # Try to get the RGB value of the hex color
+#   hex_rgb <- tryCatch(col2rgb(hex), error = function(e) return(NA))
+  
+#   # If it's NA (invalid hex), return NA
+#   if (any(is.na(hex_rgb))) return(NA)
+  
+#   # Get all base R color names and their RGB values
+#   all_colors <- colors()
+#   all_rgb <- col2rgb(all_colors)
+  
+#   # Compute Euclidean distances between hex color and each base color
+#   distances <- apply(all_rgb, 2, function(color_rgb) {
+#     sum((color_rgb - hex_rgb)^2)
+#   })
+  
+#   # Find the closest color name
+#   closest <- all_colors[which.min(distances)]
+#   return(closest)
+# }
+
+
+# non_white_pixels$color_name <- sapply(unlist(non_white_pixels$hex), closest_color_name)
+
+
+# closest_color_name("#E6C8E5") 
+
+# closest_color_name("#C7D7D0") 
+
+
+
+# non_white_pixels |> select(color_name) |> distinct()
+
+
+# non_white_pixels2 = non_white_pixels |> 
+#   filter(!str_detect(color_name, regex("gra", ignore_case = TRUE))) # Remove gray
+
+# non_white_pixels |> group_by(color_name) |> summarise(mean_long = mean(lon),
+#                                                       mean_lat = mean(lat))
+
+# non_white_pixels2 = non_white_pixels2 |> filter(lon > 5 & lat < 10) #filter based on node lat and long to minimize some colors
+
+# non_white_pixels2 |> select(color_name) |> distinct() #unique colors
+
+
+# write.csv(non_white_pixels2, file = './color_data_0BCE.csv')
+
+############################################################
+# Load the pixel data for 0 bc and find the nearest points # 
+############################################################
+
+non_white_pixels2 = read.csv(file = './color_data_0BCE.csv')
+
+# Compute all pairwise distances using geodist (haversine is the default method)
+dist_matrix <- geodist(time_data |> select(longitude, latitude) |> 
+                         rename('lon'= "longitude" , 'lat' = "latitude"),
+                       non_white_pixels2[, c("lon", "lat")],
+                       measure = "haversine")
+
+# Find the index of the minimum distance for each row in df_a
+closest_index <- apply(dist_matrix, 1, which.min)
+
+# Create the result by combining df_a with closest matches and distances
+closest_matches <- time_data %>%
+  mutate(
+    closest_id = non_white_pixels2$id[closest_index],
+    closest_color = non_white_pixels2$color_name[closest_index],
+    min_distance_m = dist_matrix[cbind(1:nrow(time_data), closest_index)]
+  )
+
+validation = closest_matches |> select(longitude, latitude,
+                                       closest_color, min_distance_m)
+
+table(validation$closest_color)
+
+validation2 = validation |> 
+  mutate(geo_region_3200 = case_when(longitude >= 8.65 & latitude >= -18.2 & 
+                                  (closest_color == 'thistle' | 
+                                     closest_color == 'thistle3'| 
+                                     closest_color =='bisque2') ~ 'savanna',
+                                longitude >= 8.78 & latitude >= -12.8 & 
+                                  (closest_color  == 'springgreen4' | closest_color == 'azure3'| 
+                                     closest_color  == 'lightcyan4'| closest_color  == 'seagreen' |
+                                     closest_color == 'darkseagreen2'| closest_color  == 'mediumseagreen'|
+                                     closest_color == 'mistyrose2') ~ 'tropical_rainforest',
+                                longitude >= 24.6 & latitude >= -31.5 & 
+                                  (closest_color  == 'khaki2' | closest_color == 'powderblue'| 
+                                     closest_color =='palegoldenrod') ~ 'grasslands',
+                                longitude >= 17.3 & latitude >= -28 & 
+                                  (closest_color  == 'palegreen3' | 
+                                     closest_color  == 'lightcyan2' | closest_color == 'mediumseagreen'| 
+                                     closest_color == 'lavenderblush3') ~ 'woodland',
+                                longitude >= 10.5 & latitude >= -22.7 & 
+                                  (closest_color  == 'darkseagreen2' | closest_color  == 'darkseagreen3' | 
+                                     closest_color == 'honeydew2'| closest_color  == 'ivory3' ) ~ 'scrub',
+                                longitude >= 21.8 & latitude >= -22.9 & closest_color  == 'navajowhite2' ~ 'semi_desert'
+  )
+)
+
+validation0 = validation2 |> mutate(geo_region_3200 = ifelse(is.na(geo_region_3200) == TRUE, 
+                                                        'tropical_rainforest', geo_region_3200))
+
+
+############################
+# Combine the three images #
+############################
+
+
+# --- combine the relevant columns into the time data set --- #
+
+
+time_data = time_data |> mutate(geo_region_5000 = validation5000$geo_region_5000,
+                           geo_region_4_5000 = validation3000$geo_region_4_5000,
+                           geo_region_3200 = validation0$geo_region_3200)
+
+time_data = time_data |> mutate(cat_5000 = case_when(geo_region_5000 == 'semi_desert' ~ 1,
+                                            geo_region_5000 == 'grasslands' ~ 2,
+                                            geo_region_5000 == 'savanna' ~ 6,
+                                            geo_region_5000 == 'scrub' ~ 5,
+                                            geo_region_5000 == 'woodland' ~ 4,
+                                            geo_region_5000 == 'tropical_rainforest' ~ 3),
+                       
+                       cat_4_5000 = case_when(geo_region_4_5000 == 'semi_desert' ~ 1,
+                                            geo_region_4_5000 == 'grasslands' ~ 2,
+                                            geo_region_4_5000 == 'savanna' ~ 6,
+                                            geo_region_4_5000 == 'scrub' ~ 5,
+                                            geo_region_4_5000 == 'woodland' ~ 4,
+                                            geo_region_4_5000 == 'tropical_rainforest' ~ 3),
+
+                       cat_3200 = case_when(geo_region_3200 == 'semi_desert' ~ 1,
+                                            geo_region_3200 == 'grasslands' ~ 2,
+                                            geo_region_3200 == 'savanna' ~ 6,
+                                            geo_region_3200 == 'scrub' ~ 5,
+                                            geo_region_3200 == 'woodland' ~ 4,
+                                            geo_region_3200 == 'tropical_rainforest' ~ 3)
+)
+
+# --- Load in data to map the languages --- #
+
+geo_coords = readxl::read_xlsx("./Geo-coordinates-timing.xlsx", sheet = "Sheet1")
+
+geo_coords = geo_coords |> select(1, 4, 5, 7, 8, 9)
+
+geo_coords = geo_coords |> rename(word = 1) |>
+    mutate(word = str_replace_all(word, "\\*", "")) |>
+    mutate(word = ifelse(word == 'D308_Bodo2', 'D308_Bodo', word)) |>
+    filter(!word %in% c('C401_Babati_1919', 'D313_Mbuttu_1919',
+                    'Zaambo_Jarawan', 'Bwazza_Jarawan', 
+                    'Mbula_Jarawan', 'Bile_Jarawan', 
+                    'Kulung_Jarawan', 'Duguri_Jarawan', 
+                    'D308_Ebodo')) |>
+    mutate(longitude = as.numeric(longitude), latitude = as.numeric(latitude)) 
+
+# create an identifier to say "if we have a language is 4-5000 and 3200 1, 0"
+
+
+# --- Separate the training and testing set --- #
+
+# test
+grid_land_df2 = time_data[416:4227,]
+
+grid_land_df2= grid_land_df2 |> 
+           mutate(cat_math = cat_5000 + cat_4_5000 + cat_3200)
+
+
+# grid_land_df2$cat_math_sc = scale(grid_land_df2$cat_math)
+
+# Send to julia for Krieging
+
+write.csv(grid_land_df2, "./for_krieg.csv")
+
+# train
+time_data = time_data[1:415, ]
+
+time_data = time_data |> mutate(row_id = row_number())
+
+geo_coords = geo_coords |> mutate(row_id = row_number()) 
+
+time_data = time_data |> left_join(geo_coords, by = 'row_id') |>
+  select(-longitude.y, -latitude.y) |>
+  rename(longitude = longitude.x, latitude = latitude.x ) |>
+  janitor::clean_names()
+
+time_data = time_data |> mutate(x4_5000bp = ifelse(x4_5000bp & x3200bp == 1, 0, 1)) |>
+          mutate(cat_math = cat_5000 * x5000bp + cat_4_5000 * x4_5000bp + cat_3200 * x3200bp)
+
+
+# time_data$cat_math_sc = scale(time_data$cat_math)
+
+
+
+
+
+# --- Euclidean Distance for nearest water --- #
+
+n <- nrow(time_data) # Number of rows
+n2 = nrow(grid_land_df2)
+
+
+euclid_vec <- vector() # Create an empty matrix to store distances
+
+
+# Train data
+for (i in 1:n) {
+
+    euclid_vec[i] = sqrt((time_data$longitude[i] - time_data$nearest_water_lon[i])^2 + 
+                             (time_data$latitude[i] - time_data$nearest_water_lat[i])^2)
+}
+
+
+euclid_vec_sc = scale(euclid_vec)
+
+# test Data
+
+euclid_vec_grid = vector()
+
+for (i in 1:n2) {
+
+    euclid_vec_grid[i] = sqrt((grid_land_df2$longitude[i] - grid_land_df2$nearest_water_lon[i])^2 + 
+                             (grid_land_df2$latitude[i] - grid_land_df2$nearest_water_lat[i])^2)
+}
+
+
+euclid_vec_sc2 = scale(euclid_vec_grid)
+
+
+
+
+################################################################################
+# Calculating the differences
+################################################################################
+
+# Difference in latitude, longitude, interaction, and quadratic ---------------
+
+start_time <- proc.time()
+
+
+# Number of rows
+n <- nrow(time_data)
+
+# Create an empty matrix to store distances
+long_mat <- matrix(NA, nrow = n, ncol = n)
+lat_mat <- matrix(NA, nrow = n, ncol = n)
+long_mat_sq <- matrix(NA, nrow = n, ncol = n)
+lat_mat_sq <- matrix(NA, nrow = n, ncol = n)
+long_lat_int_mat <- matrix(NA, nrow = n, ncol = n)
+
+
+for (i in 1:n) {
+  for (j in i:n) {  # Only loop through upper triangle
+    if (i == j) {
+      long_mat[i, j] <- 0
+      lat_mat[i, j] <- 0
+      long_mat_sq[i, j] <- 0
+      lat_mat_sq[i, j] <- 0
+      long_lat_int_mat[i, j] <- 0
+      next
+    }
+    
+    long_diff <- unlist(time_data[i, "long_sc"]) - unlist(time_data[j, "long_sc"])
+    long_mat[i, j] <- long_diff
+    long_mat[j, i] <- long_diff 
+
+    lat_diff <- unlist(time_data[i, "lat_sc"]) - unlist(time_data[j, "lat_sc"])
+    lat_mat[i, j] <- lat_diff
+    lat_mat[j, i] <- lat_diff 
+
+    long_diff_sq <- unlist(time_data[i, "long_sc"])^2 - unlist(time_data[j, "long_sc"])^2
+    long_mat_sq[i, j] <- long_diff_sq
+    long_mat_sq[j, i] <- long_diff_sq
+
+    lat_diff_sq <- unlist(time_data[i, "lat_sc"])^2 - unlist(time_data[j, "lat_sc"])^2
+    lat_mat_sq[i, j] <- lat_diff_sq
+    lat_mat_sq[j, i] <- lat_diff_sq
+
+    long_lat_mat_int_diff <- (unlist(time_data[i, "long_sc"])*unlist(time_data[i, "lat_sc"])) - (unlist(time_data[j, "long_sc"]) * unlist(time_data[i, "lat_sc"]))
+    long_lat_int_mat[i, j] <- long_lat_mat_int_diff
+    long_lat_int_mat[j, i] <- long_lat_mat_int_diff
+  }
+}
+
+end_time <- proc.time()
+elapsed <- end_time - start_time
+print(elapsed)
+
+
+long_vec = c()
+lat_vec = c()
+long_vec_sq = c()
+lat_vec_sq = c()
+long_lat_int_sq = c()
+
+
+
+for (i in 1:(nrow(long_mat) - 1)) {
+  long_vec <- c(long_vec, long_mat[i, (i + 1):ncol(long_mat)])
+  lat_vec <- c(lat_vec, lat_mat[i, (i + 1):ncol(lat_mat)])
+  long_vec_sq <- c(long_vec_sq, long_mat_sq[i, (i + 1):ncol(long_mat_sq)])
+  lat_vec_sq <- c(lat_vec_sq, lat_mat_sq[i, (i + 1):ncol(lat_mat_sq)])
+  long_lat_int_sq <- c(long_lat_int_sq, long_lat_int_mat[i, (i + 1):ncol(long_lat_int_mat)])
+}
+
+
+# Number of rows
+n <- nrow(time_data)
+
+# Create an empty matrix to store distances
+elevation_matrix <- matrix(NA, nrow = n, ncol = n)
+
+
+
+for (i in 1:n) {
+  for (j in i:n) {  # Only loop through upper triangle
+    if (i == j) {
+      elevation_matrix[i, j] <- 0
+      next
+    }
+    
+    elevation_diff <- unlist(time_data[i, 'elevation']) - unlist(time_data[j, 'elevation'])
+    elevation_matrix[i, j] <- elevation_diff
+    elevation_matrix[j, i] <- elevation_diff  # Symmetric
+  }
+}
+
+
+elev_mat = elevation_matrix
+
+elev_vec = c()
+
+for (i in 1:(nrow(elev_mat) - 1)) {
+  elev_vec <- c(elev_vec, elev_mat[i, (i + 1):ncol(elev_mat)])
+}
+
+
+# Fresh Water ------------------------------------------------------------------
+
+#Differencing for the Dyads
+
+nearest_matrix = matrix(NA, nrow = n, ncol = n)
+
+for (i in 1:n) {
+  for (j in i:n) {  # Only loop through upper triangle
+    
+    nearest_diff <- euclid_vec_sc[i] - euclid_vec_sc[j]
+    nearest_matrix[i, j] <- nearest_diff
+    nearest_matrix[j, i] <- nearest_diff  # Symmetric
+  }
+}
+
+dist2fresh_diff <- c()
+
+# Loop through each row and extract the upper triangular part row-wise
+for (i in 1:(nrow(nearest_matrix) - 1)) {
+  dist2fresh_diff <- c(dist2fresh_diff, nearest_matrix[i, (i + 1):ncol(nearest_matrix)])
+}
+
+
+# --- Differencing the cat_math column --- #
+
+# Number of rows
+n <- nrow(time_data)
+
+# Create an empty matrix to store distances
+cat_math_matrix <- matrix(NA, nrow = n, ncol = n)
+
+
+for (i in 1:n) {
+  for (j in i:n) {  # Only loop through upper triangle
+    # if (i == j) {
+    #   cat_math_matrix[i, j] <- 0
+    #   next
+    # }
+    
+    cat_math_diff <- unlist(time_data[i, 'cat_math']) - unlist(time_data[j, 'cat_math'])
+    cat_math_matrix[i, j] <- cat_math_diff
+    cat_math_matrix[j, i] <- cat_math_diff  # Symmetric
+  }
+}
+
+
+cat_math_mat = cat_math_matrix
+
+cat_math_vec = c()
+
+for (i in 1:(nrow(cat_math_mat) - 1)) {
+  cat_math_vec <- c(cat_math_vec, cat_math_mat[i, (i + 1):ncol(cat_math_mat)])
+}
+
+# ds  ---------------------------------------------------------------------------
+
+
+
+# Number of rows
+n <- nrow(time_data)
+
+
+# Create an empty matrix to store 
+ds_mat <- matrix(NA, nrow = n, ncol = n)
+
+
+
+
+for (i in 1:n) {
+  for (j in i:n) {  # Only loop through upper triangle
+    ds_diff <- geodist_vec(x1 = unlist(time_data[i, 'longitude']), 
+                           y1 = unlist(time_data[i, 'latitude']),
+                           x2 = unlist(time_data[j, 'longitude']), 
+                           y2 = unlist(time_data[j, 'latitude']),
+                           paired = F,
+                           measure = 'haversine')/1000
+    
+    ds_mat[i, j] <- ds_diff
+    ds_mat[j, i] <- ds_diff  # Symmetric
+  }
+}
+
+max(ds_mat)
+
+
+
+ds_vec = c()
+
+for (i in 1:(nrow(ds_mat) - 1)) {
+  ds_vec <- c(ds_vec, ds_mat[i, (i + 1):ncol(ds_mat)])
+}
+
+
+ds_vec = rescale(ds_vec, to = c(0.00001,1))
+
+
+
+
+# H Mapping Matrix -------------------------------------------------------------------------------------------
+
+# n = nrow(time_data)
+
+# N = n*(n-1)/2
+
+
+# H = matrix(data = 0, nrow = N, ncol = n)
+
+# idx = 1
+
+# for (i in 1:(n-1)) {
+#   for (j in (i+1):n) {  
+#       H[idx, i] <- 1
+#       H[idx, j] = 1
+#       idx = idx + 1
+#   }
+# }
+
+# write.csv(H, file = './h_nodt.csv')
+
+
+# K Mapping Matrix -------------------------------------------------------------------------------------------
+
+# n = nrow(time_data)
+
+# N = n*(n-1)/2
+
+
+# K = matrix(data = 0, nrow = N, ncol = n)
+
+# idx = 1
+
+# for (i in 1:(n-1)) {
+#   for (j in (i+1):n) {  
+#     K[idx, i] <- 1
+#     K[idx, j] = -1
+#     idx = idx + 1
+#   }
+# }
+
+# write.csv(K, file = './k_nodt.csv')
+
+
+
+#################################
+#    Initial design matrix     #
+#################################
+
+# --- Grab the string distances --- #
+
+# string_mat = read.csv('./distance_mat_nodt.csv')
+
+# string_mat = string_mat[,-1]
+
+
+# string_vec = c()
+
+# for (i in 1:(nrow(string_mat) - 1)) {
+#   string_vec <- c(string_vec, string_mat[i, (i + 1):ncol(string_mat)])
+# }
+
+
+
+lines <- read_lines("Nexus-Distance.txt")
+
+start <- which(str_detect(lines, "^MATRIX")) + 1
+end   <- which(str_detect(lines, "^;")) - 1
+
+mat_lines <- lines[start:end]
+
+clean <- lapply(mat_lines, function(x) {
+  x <- str_remove(x, "^\\[\\d+\\]\\s*")
+  parts <- str_split(x, "\\s{2,}", simplify = TRUE)
+  c(str_remove_all(parts[1], "'"), str_split(parts[2], "\\s+")[[1]])
+})
+
+df <- as.data.frame(do.call(rbind, clean), stringsAsFactors = FALSE)
+names(df)[1] <- "language"
+df[-1] <- lapply(df[-1], as.numeric)
+
+df = df |> select(-language)
+
+
+string_vec = c()
+
+for (i in 1:(nrow(df) - 1)) {
+  string_vec <- c(string_vec, df[i, (i + 1):ncol(df)])
+}
+
+
+# --- Combining variables into one dataset --- #
+
+cov_data = cbind(unlist(string_vec), #from string_distance scripts
+                unlist(long_vec),
+                unlist(lat_vec),
+                 unlist(elev_vec), 
+                 unlist(dist2fresh_diff), 
+                 unlist(long_vec_sq),
+                 unlist(lat_vec_sq),
+                 unlist(long_lat_int_sq),
+                 unlist(cat_math_vec),
+                 unlist(ds_vec))
+
+cov_data = as.data.frame(cov_data)
+
+cov_data = cov_data |> rename('string_diff' = V1,
+                              'long_diff' = V2,
+                              'lat_diff' = V3,
+                              'elev_diff' = V4,
+                              'dist2fresh_diff' = V5,
+                              'long_diff_sq' = V6,
+                              'lat_diff_sq' = V7,
+                              'long_lat_int_sq' = V8,
+                              'cat_math_diff' = V9,
+                              'ds' = V10)
+
+write.csv(cov_data, file = './cov_data_nodt.csv')
+
+# time_data = time_data |> mutate(nearest_diff = dist2fresh_diff) # for plotting purposes
+
+# write.csv(time_data, file = './time_data_sc_nodt.csv') #scaled data for plotting
+
+
+  
