@@ -169,24 +169,32 @@ site_eras <- ifelse(time_data$x5000bp == 1, "5000BP",
                ifelse(time_data$x4_5000bp == 1, "4000BP", 
                  ifelse(time_data$x3200bp == 1, "3200BP", NA)))
 
-# 2. Define the Tree-Building Function
+
+
+library(mvtnorm)
+
 build_migration_tree <- function(S, r0_idx, pred_list, site_eras, grid_coords, dt_g, Q, rho, p_min, K_max) {
   
+  # 1. Setup Data Structures
   S_clean <- unname(matrix(as.numeric(as.matrix(S[, 1:2])), ncol = 2))
   N <- nrow(S_clean)
   
+  # Initialize the collector for ALL probabilities seen in each era
+  era_probs_collector <- list("5000BP" = c(), "4000BP" = c(), "3200BP" = c())
+  
+  # Root node
   root_node <- list(idx = r0_idx, loc = S_clean[r0_idx, ], depth = 0, 
-                    parent_idx = NULL, era = site_eras[r0_idx])
+                    parent_idx = NULL, era = site_eras[r0_idx], prob_table = NULL)
   
   V_global <- c(r0_idx)
   All_Nodes <- list(root_node)
   era_labels <- c("5000BP", "4000BP", "3200BP")
   
+  # 2. Main Era Loop
   for (e_idx in 1:length(era_labels)) {
     current_era <- era_labels[e_idx]
-    current_potentials <- pred_list[[e_idx]] # This has 3812 values
+    current_potentials <- pred_list[[e_idx]] 
     
-    # Pool: Only the 415 sites belonging to this era
     target_pool <- which(site_eras == current_era & !(1:N %in% V_global))
     Frontier <- All_Nodes
     
@@ -197,34 +205,53 @@ build_migration_tree <- function(S, r0_idx, pred_list, site_eras, grid_coords, d
         U <- intersect(target_pool, setdiff(1:N, V_global))
         if (length(U) == 0) next
         
-        # GRADIENT: Uses the 3812 grid points to find direction
+        # 3. Calculate Gradient and Target
         grad_H <- local_grad_2d(grid_coords$longitude, grid_coords$latitude, 
                                 current_potentials, v$loc[1], v$loc[2], h = 2)
         
         m <- -grad_H$grad * dt_g
         target_mu <- v$loc + m
         
-        # DISTANCE: Measures distance to the 415 language sites
+        # 4. Probability Calculations
         S_subset <- S_clean[U, , drop = FALSE]
         diffs_U <- S_subset - rep(target_mu, each = nrow(S_subset))
+        
+        # dmvnorm gives raw weights (density)
         weights <- dmvnorm(diffs_U, mean = c(0, 0), sigma = Q * dt_g)
         
         if (sum(weights, na.rm = TRUE) == 0) next 
-        probs <- weights / sum(weights)
         
-        # --- Branching Selection (Split vs Single) ---
+        # Normalize weights to get individual probabilities
+        probs <- weights / sum(weights)
+
+        # STORE: All individual probabilities found in this decision
+        era_probs_collector[[current_era]] <- c(era_probs_collector[[current_era]], probs)
+
+        # 5. Create Enhanced Report Table (Warning-Free)
+        current_prob_report <- data.frame(
+          site_idx = U,
+          prob     = probs,
+          m_lon    = unname(m[1]),      
+          m_lat    = unname(m[2]),      
+          target_x = unname(target_mu[1]), 
+          target_y = unname(target_mu[2]),
+          row.names = NULL 
+        )
+        current_prob_report <- current_prob_report[order(current_prob_report$prob, decreasing = TRUE), ]
+
+        # 6. Branching Logic
         is_split <- FALSE
         if (length(U) >= 2) {
-          ord <- order(probs, decreasing = TRUE)
-          j1 <- U[ord[1]]; p_j1 <- probs[ord[1]]
-          j2 <- U[ord[2]]; p_j2 <- probs[ord[2]]
+          j1 <- current_prob_report$site_idx[1]; p_j1 <- current_prob_report$prob[1]
+          j2 <- current_prob_report$site_idx[2]; p_j2 <- current_prob_report$prob[2]
           
           if ((p_j1 / p_j2 <= rho) && (p_j2 >= p_min)) {
             is_split <- TRUE
             for (idx_child in c(j1, j2)) {
               if (!(idx_child %in% V_global)) {
                 child <- list(idx = idx_child, loc = S_clean[idx_child,], 
-                              depth = v$depth + 1, parent_idx = v$idx, era = current_era)
+                              depth = v$depth + 1, parent_idx = v$idx, 
+                              era = current_era, prob_table = current_prob_report)
                 F_next <- c(F_next, list(child))
                 V_global <- c(V_global, idx_child)
                 target_pool <- setdiff(target_pool, idx_child)
@@ -236,11 +263,14 @@ build_migration_tree <- function(S, r0_idx, pred_list, site_eras, grid_coords, d
         if (!is_split) {
           U_curr <- intersect(target_pool, setdiff(1:N, V_global))
           if (length(U_curr) > 0) {
-            w_curr <- weights[U %in% U_curr]
-            if (sum(w_curr, na.rm = TRUE) > 0) {
-              J <- if(length(U_curr) == 1) U_curr else sample(U_curr, 1, prob = w_curr/sum(w_curr))
+            # Use the calculated probs for sampling
+            curr_probs <- probs[U %in% U_curr]
+            if (sum(curr_probs, na.rm = TRUE) > 0) {
+              J <- if(length(U_curr) == 1) U_curr else sample(U_curr, 1, prob = curr_probs/sum(curr_probs))
+              
               child <- list(idx = J, loc = S_clean[J,], depth = v$depth + 1, 
-                            parent_idx = v$idx, era = current_era)
+                            parent_idx = v$idx, era = current_era,
+                            prob_table = current_prob_report)
               F_next <- c(F_next, list(child))
               V_global <- c(V_global, J)
               target_pool <- setdiff(target_pool, J)
@@ -254,18 +284,46 @@ build_migration_tree <- function(S, r0_idx, pred_list, site_eras, grid_coords, d
       k_era <- k_era + 1
     }
   }
-  return(All_Nodes)
+  
+  return(list(tree = All_Nodes, histograms = era_probs_collector))
 }
 
-# 3. Execution
-migration_tree <- build_migration_tree(
-  S = sites,                      # 415 rows
+output <- build_migration_tree(
+  S = sites, 
   r0_idx = 9, 
-  pred_list = pred_list,          # each list item has 3812 values
-  site_eras = site_eras,          # 415 values
-  grid_coords = grid_land_df2,     # 3812 rows
+  pred_list = pred_list, 
+  site_eras = site_eras, 
+  grid_coords = grid_land_df2, 
   dt_g = 1, Q = diag(2), rho = 1.05, p_min = 0.01, K_max = 1000
 )
+
+# Visualization Script
+par(mfrow = c(1, 3)) # One plot per era
+
+for (era in names(output$histograms)) {
+  # We use log10 to see the spread of probabilities clearly
+  # Adding a tiny constant to avoid log(0)
+  log_probs <- log10(output$histograms[[era]] + 1e-10)
+  
+  hist(log_probs, 
+       main = paste("Prob. Distribution:", era),
+       xlab = "log10(Probability)", 
+       col = "darkseagreen", 
+       border = "white",
+       breaks = 30)
+}
+
+  hist(log10(output$histograms[["4000BP"]] + 1e-10), 
+       main = paste("Prob. Distribution:", era),
+       xlab = "log10(Probability)", 
+       col = "darkseagreen", 
+       border = "white",
+       xlim = c(-20, 10),
+       breaks = 30)
+
+
+
+
 
 # --- 5. Plotting --- #
 plot_migration_tree <- function(tree_nodes, all_sites) {
