@@ -874,8 +874,11 @@ time_data = time_data |> left_join(geo_coords, by = 'row_id') |>
   rename(longitude = longitude.x, latitude = latitude.x ) |>
   janitor::clean_names()
 
-time_data = time_data |> mutate(x4_5000bp = ifelse(x4_5000bp & x3200bp == 1, 0, 1)) |>
-          mutate(cat_math = cat_5000 * x5000bp + cat_4_5000 * x4_5000bp + cat_3200 * x3200bp)
+time_data = time_data |> 
+  mutate(x4_5000bp = ifelse(x4_5000bp & x3200bp == 1, 0, 1)) |>
+  mutate(
+    cat_math = cat_5000 * x5000bp + cat_4_5000 * x4_5000bp + cat_3200 * x3200bp
+  )
 
 
 # time_data$cat_math_sc = scale(time_data$cat_math)
