@@ -263,33 +263,33 @@ time_data$nearest_water_lon_sc = scale(time_data$nearest_water_lon,
 
 # --- Load in the image data --- #
 
-image_path <- "./3000BC_.png"  # 3000 BC
+# image_path <- "./3000BC_.png"  # 3000 BC
 
-image_path2 = "./5000bc_.PNG" # 5000 BC
+# image_path2 = "./5000bc_.PNG" # 5000 BC
 
-image_path3 = "./Africa0BC.PNG"
+# image_path3 = "./Africa0BC.PNG"
 
-#convert path to an image in r
-img = image_read(image_path) 
+# #convert path to an image in r
+# img = image_read(image_path) 
 
-#obtain the format, dimensions, etc of the image
-image_info(img) 
+# #obtain the format, dimensions, etc of the image
+# image_info(img) 
 
-#pdf(file = './3000BCafrica.pdf', width = 5.5, height = 5)
+# #pdf(file = './3000BCafrica.pdf', width = 5.5, height = 5)
 
-plot(img)
+# plot(img)
 
 
-dev.off()
+# dev.off()
 
-#Converts the information to extract RGB info
-img_raster = image_data(img, channels = 'rgb') 
+# #Converts the information to extract RGB info
+# img_raster = image_data(img, channels = 'rgb') 
 
-# Convert the raster to a matrix
-img_matrix <- as.integer(img_raster) 
+# # Convert the raster to a matrix
+# img_matrix <- as.integer(img_raster) 
 
-# Get the dimensions of the image
-dims <- dim(img_matrix)
+# # Get the dimensions of the image
+# dims <- dim(img_matrix)
 
 ##############################################################################
 # For the 3000 BC image, we grab the rgb pixels then map the time data to it #
